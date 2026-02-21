@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Operational Visibility Report</title>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+    <style>
+        body{font-family:Arial;margin:20px}
+        table{border-collapse:collapse;margin-top:15px; font-size: 11px;}
+        th,td{border:1px solid #ccc;padding:4px 6px;text-align:center}
+        th{background:#eee; position: sticky; top: 0;}
+        .total-row { background: #f9f9f9; font-weight: bold; }
+        button{padding:8px 15px; margin-right:10px; cursor: pointer; background: #28a745; color: white; border: none; border-radius: 4px;}
+        button:hover{background: #218838;}
+        #msg{font-weight: bold; color: blue;}
+    </style>
+</head>
+
+<body>
+
+<h2>Operational Visibility Report</h2>
+
+<input type="file" id="file" accept=".xlsx, .xls">
+<button onclick="downloadExcel()">Download MIS</button>
+<span id="msg"></span>
+
+<div id="table"></div>
+
+<script>
+let finalData = {}; 
+
+document.getElementById("file").addEventListener("change", e => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = function(evt) {
+        try {
+            const data = evt.target.result;
+            const wb = XLSX.read(data, { type: 'binary' });
+            const sheet = wb.Sheets[wb.SheetNames[0]];
+            const rows = XLSX.utils.sheet_to_json(sheet, { raw: true });
+
+            process(rows);
+            document.getElementById("msg").innerHTML = "Loaded ✓";
+        } catch (err) {
+            alert("Error reading file: " + err.message);
+        }
+    };
+    reader.readAsBinaryString(file);
+});
+
+function getQueueFromStatus(statusRaw) {
+    if (!statusRaw) return "SO";
+    const status = statusRaw.toString().toUpperCase().trim();
+
+    // Mapping based on your screenshot
+    if (status.includes("AUTH DONE")) return "DISB";
+    if (status.includes("LOAN SANCTIONED")) return "SC";
+    if (status.includes("QC") || status.includes("AUDIT PENDING")) return "OPS";
+    
+    if (
+        status.includes("REFER CREDIT MANAGER") || status.includes("FORWARD") ||
+        status.includes("CREDIT APPROVAL") || status.includes("CAM-HOLD") ||
+        status.includes("RE-SUBMITTED") || status.includes("DOCUMENT REQUEST SUBMITTED") ||
+        status.includes("DOC VERIFICATION PENDING") || status.includes("OSV VERIFIED")
+    ) return "CR";
+
+    if (
+        status.includes("LOAN CANCELLED") || status.includes("COMPLIANCE REJECTED") ||
+        status.includes("LOAN DECLINED") || status.includes("DUPLICATE LEAD") ||
+        status.includes("BUREAU STATUS PENDING")
+    ) return "RJ";
+
+    return "SO"; // Default for all other SO statuses
+}
+
+function process(rows) {
+    const today = new Date(); today.setHours(0,0,0,0);
+    const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+    const weekStart = new Date(today); weekStart.setDate(today.getDate() - today.getDay());
+
+    let map = {};
+
+    rows.forEach(r => {
+        let asm = (r["ASMName"] || r["ASM"] || "ONLINE LEAD").toString().trim();
+        let status = (r["Status"] || "");
+        let bucket = getQueueFromStatus(status);
+
+        let rawDate = r["LeadCreatedOn"];
+        if (!rawDate) return;
+
+        let dt;
+        if (!isNaN(rawDate) && typeof rawDate === 'number') {
+            let d = XLSX.SSF.parse_date_code(rawDate);
+            dt = new Date(d.y, d.m - 1, d.d);
+        } else {
+            let p = rawDate.toString().split(/[\/ :\-]/);
+            dt = new Date(p[2], p[1] - 1, p[0]);
+        }
+
+        if (isNaN(dt.getTime())) return;
+        dt.setHours(0,0,0,0);
+
+        if (!map[asm]) {
+            map[asm] = {
+                MTD: { DISB: 0, SO: 0, CR: 0, SC: 0, RJ: 0, OPS: 0, TOTAL: 0 },
+                WTD: { DISB: 0, SO: 0, CR: 0, SC: 0, RJ: 0, OPS: 0, TOTAL: 0 },
+                YEST: { DISB: 0, SO: 0, CR: 0, SC: 0, RJ: 0, OPS: 0, TOTAL: 0 },
+                TODAY: { DISB: 0, SO: 0, CR: 0, SC: 0, RJ: 0, OPS: 0, TOTAL: 0 },
+                GRAND: 0
+            };
+        }
+
+        map[asm].GRAND++;
+
+        // MTD
+        if (dt.getMonth() === today.getMonth() && dt.getFullYear() === today.getFullYear()) {
+            map[asm].MTD[bucket]++;
+            map[asm].MTD.TOTAL++;
+        }
+        // WTD
+        if (dt >= weekStart && dt <= today) {
+            map[asm].WTD[bucket]++;
+            map[asm].WTD.TOTAL++;
+        }
+        // Yesterday
+        if (dt.getTime() === yesterday.getTime()) {
+            map[asm].YEST[bucket]++;
+            map[asm].YEST.TOTAL++;
+        }
+        // Today
+        if (dt.getTime() === today.getTime()) {
+            map[asm].TODAY[bucket]++;
+            map[asm].TODAY.TOTAL++;
+        }
+    });
+
+    finalData = map;
+    render(map);
+}
+
+function render(map) {
+    let html = `<table>
+    <tr>
+        <th rowspan="2">ASM</th>
+        <th colspan="7">MTD</th>
+        <th colspan="7">WTD</th>
+        <th colspan="7">Yesterday</th>
+        <th colspan="7">Today</th>
+        <th rowspan="2">Grand</th>
+    </tr>
+    <tr>
+        <th>DISB</th><th>SO</th><th>CR</th><th>SC</th><th>RJ</th><th>OPS</th><th>TOTAL</th>
+        <th>DISB</th><th>SO</th><th>CR</th><th>SC</th><th>RJ</th><th>OPS</th><th>TOTAL</th>
+        <th>DISB</th><th>SO</th><th>CR</th><th>SC</th><th>RJ</th><th>OPS</th><th>TOTAL</th>
+        <th>DISB</th><th>SO</th><th>CR</th><th>SC</th><th>RJ</th><th>OPS</th><th>TOTAL</th>
+    </tr>`;
+
+    let totals = {
+        MTD: { DISB:0, SO:0, CR:0, SC:0, RJ:0, OPS:0, TOTAL:0 },
+        WTD: { DISB:0, SO:0, CR:0, SC:0, RJ:0, OPS:0, TOTAL:0 },
+        YEST: { DISB:0, SO:0, CR:0, SC:0, RJ:0, OPS:0, TOTAL:0 },
+        TODAY: { DISB:0, SO:0, CR:0, SC:0, RJ:0, OPS:0, TOTAL:0 },
+        GRAND: 0
+    };
+
+    for (let asm in map) {
+        let r = map[asm];
+        html += `<tr>
+            <td>${asm}</td>
+            <td>${r.MTD.DISB}</td><td>${r.MTD.SO}</td><td>${r.MTD.CR}</td><td>${r.MTD.SC}</td><td>${r.MTD.RJ}</td><td>${r.MTD.OPS}</td><td style="background:#eee"><b>${r.MTD.TOTAL}</b></td>
+            <td>${r.WTD.DISB}</td><td>${r.WTD.SO}</td><td>${r.WTD.CR}</td><td>${r.WTD.SC}</td><td>${r.WTD.RJ}</td><td>${r.WTD.OPS}</td><td style="background:#eee"><b>${r.WTD.TOTAL}</b></td>
+            <td>${r.YEST.DISB}</td><td>${r.YEST.SO}</td><td>${r.YEST.CR}</td><td>${r.YEST.SC}</td><td>${r.YEST.RJ}</td><td>${r.YEST.OPS}</td><td style="background:#eee"><b>${r.YEST.TOTAL}</b></td>
+            <td>${r.TODAY.DISB}</td><td>${r.TODAY.SO}</td><td>${r.TODAY.CR}</td><td>${r.TODAY.SC}</td><td>${r.TODAY.RJ}</td><td>${r.TODAY.OPS}</td><td style="background:#eee"><b>${r.TODAY.TOTAL}</b></td>
+            <td style="background:#ddd"><b>${r.GRAND}</b></td>
+        </tr>`;
+
+        // Sum for bottom total row
+        for(let cat of ['MTD','WTD','YEST','TODAY']) {
+            for(let b of ['DISB','SO','CR','SC','RJ','OPS','TOTAL']) {
+                totals[cat][b] += r[cat][b];
+            }
+        }
+        totals.GRAND += r.GRAND;
+    }
+
+    // Generate the "TOTAL" bottom row matching your screenshot
+    html += `<tr class="total-row">
+        <td>TOTAL</td>
+        <td>${totals.MTD.DISB}</td><td>${totals.MTD.SO}</td><td>${totals.MTD.CR}</td><td>${totals.MTD.SC}</td><td>${totals.MTD.RJ}</td><td>${totals.MTD.OPS}</td><td>${totals.MTD.TOTAL}</td>
+        <td>${totals.WTD.DISB}</td><td>${totals.WTD.SO}</td><td>${totals.WTD.CR}</td><td>${totals.WTD.SC}</td><td>${totals.WTD.RJ}</td><td>${totals.WTD.OPS}</td><td>${totals.WTD.TOTAL}</td>
+        <td>${totals.YEST.DISB}</td><td>${totals.YEST.SO}</td><td>${totals.YEST.CR}</td><td>${totals.YEST.SC}</td><td>${totals.YEST.RJ}</td><td>${totals.YEST.OPS}</td><td>${totals.YEST.TOTAL}</td>
+        <td>${totals.TODAY.DISB}</td><td>${totals.TODAY.SO}</td><td>${totals.TODAY.CR}</td><td>${totals.TODAY.SC}</td><td>${totals.TODAY.RJ}</td><td>${totals.TODAY.OPS}</td><td>${totals.TODAY.TOTAL}</td>
+        <td>${totals.GRAND}</td>
+    </tr>`;
+
+    html += "</table>";
+    document.getElementById("table").innerHTML = html;
+}
+
+function downloadExcel() {
+    if (Object.keys(finalData).length === 0) {
+        alert("Upload and process a file first!");
+        return;
+    }
+    // Excel export logic can follow the same structure as render() if needed
+    const table = document.getElementById("table").querySelector("table");
+    const wb = XLSX.utils.table_to_book(table, {sheet: "MIS"});
+    XLSX.writeFile(wb, "Operational_Visibility_Report.xlsx");
+}
+</script>
+
+</body>
+</html>
